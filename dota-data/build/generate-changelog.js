@@ -1,0 +1,768 @@
+const fs = require('fs');
+const path = require('path');
+
+const filesDir = path.join(__dirname, '../files');
+const changelogIndexPath = path.join(filesDir, 'changelog-index.json');
+const changelogsDir = path.join(filesDir, 'changelogs');
+const statesDir = path.join(filesDir, 'changelog-states');
+
+// Ensure directories exist
+[changelogsDir, statesDir].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+// Files to track
+const trackedFiles = [
+  { file: 'vscripts/api.json', type: 'api', name: 'Lua API' },
+  { file: 'vscripts/api-types.json', type: 'types', name: 'Lua Types' },
+  { file: 'vscripts/enums.json', type: 'enums', name: 'Lua Enums' },
+  { file: 'vscripts/modifier_list.json', type: 'modifiers', name: 'Modifiers' },
+  { file: 'events.json', type: 'events', name: 'Game Events' },
+  { file: 'panorama/api.json', type: 'panorama_api', name: 'Panorama API' },
+  { file: 'panorama/css.json', type: 'panorama_css', name: 'Panorama CSS' },
+  { file: 'panorama/events.json', type: 'panorama_events', name: 'Panorama Events' },
+  { file: 'panorama/enums.json', type: 'panorama_enums', name: 'Panorama Enums' },
+  { file: 'vscripts/modifier_properties.json', type: 'modifier_properties', name: 'Properties Fixed' },
+  { file: 'convars.json', type: 'convars', name: 'Console Variables' },
+  { file: 'engine-enums.json', type: 'engine_enums', name: 'Engine Enums' },
+  { file: 'abilities.json', type: 'abilities', name: 'Abilities' },
+  { file: 'units.json', type: 'units', name: 'Units' },
+  { file: 'abilities.json', type: 'ability_kv_properties', name: 'Ability KV Properties' },
+  { file: 'units.json', type: 'unit_kv_properties', name: 'Unit KV Properties' },
+];
+
+// Read the dump file to get version info
+const dumpPath = path.join(__dirname, '../dumper/dump');
+const dump = fs.readFileSync(dumpPath, 'utf8');
+
+const versionMatch = dump.match(/ClientVersion=(\d+)/);
+const dateMatch = dump.match(/VersionDate=(.+)/);
+const timeMatch = dump.match(/VersionTime=(.+)/);
+
+const currentVersion = {
+  version: versionMatch ? versionMatch[1] : 'unknown',
+  date: dateMatch ? dateMatch[1].trim() : new Date().toISOString().split('T')[0],
+  time: timeMatch ? timeMatch[1].trim() : '',
+};
+
+console.log(`Processing version ${currentVersion.version}...`);
+
+// Render an api Type (a plain string, or a structured object like a literal /
+// array / table) as a readable string. Without this, structured types stringify
+// to "[object Object]" when joined.
+function typeToStr(t) {
+  if (t == null) return 'nil';
+  if (typeof t === 'string') return t;
+  if (typeof t !== 'object') return String(t);
+  if (t.kind === 'literal') return typeof t.value === 'string' ? `"${t.value}"` : String(t.value);
+  if (t.kind === 'array') return `(${typesToStr(t.types)})[]`;
+  if (t.kind === 'table') {
+    return `table<${t.key ? typeToStr(t.key) : 'any'}, ${t.value ? typeToStr(t.value) : 'any'}>`;
+  }
+  if (t.kind === 'function') return 'function';
+  if (typeof t.name === 'string') return t.name;
+  return JSON.stringify(t);
+}
+function typesToStr(types) {
+  return (types || []).map(typeToStr).join(' | ');
+}
+
+// Format function signature with typed args
+function formatSignature(func) {
+  if (!func.args || !func.args.length) return `${func.name}()`;
+  const args = func.args.map(a => `${a.name}: ${typesToStr(a.types)}`).join(', ');
+  return `${func.name}(${args})`;
+}
+
+// Extract items from API
+function extractApiItems(content) {
+  const items = [];
+  if (!Array.isArray(content)) return items;
+  
+  for (const item of content) {
+    if (item.kind === 'class') {
+      items.push({ type: 'class', name: item.name });
+      if (item.members) {
+        for (const m of item.members) {
+          if (m.kind === 'function') {
+            items.push({
+              type: 'method',
+              class: item.name,
+              name: m.name,
+              signature: formatSignature(m),
+              returns: typesToStr(m.returns),
+              description: m.description || '',
+              abstract: !!m.abstract,
+            });
+          }
+        }
+      }
+    } else if (item.kind === 'function') {
+      items.push({
+        type: 'function',
+        name: item.name,
+        signature: formatSignature(item),
+        returns: typesToStr(item.returns),
+        description: item.description || '',
+      });
+    } else if (item.kind === 'constant') {
+      items.push({ type: 'constant', name: item.name, value: item.value });
+    }
+  }
+  return items;
+}
+
+// Format panorama args with types (array of {name, type?} objects)
+function formatPanoramaArgs(args) {
+  if (!args || !Array.isArray(args)) return '';
+  return args.map(a => `${a.name}: ${a.type || 'unknown'}`).join(', ');
+}
+
+// Extract Panorama API items (different format: no 'kind', members have array args)
+function extractPanoramaApiItems(content) {
+  const items = [];
+  if (!Array.isArray(content)) return items;
+  
+  for (const iface of content) {
+    if (!iface.name) continue;
+    items.push({ type: 'class', name: iface.name });
+    if (iface.members) {
+      for (const m of iface.members) {
+        items.push({
+          type: 'method',
+          class: iface.name,
+          name: m.name,
+          signature: `${m.name}(${formatPanoramaArgs(m.args)})`,
+          returns: m.returns || '',
+          description: m.description || '',
+        });
+      }
+    }
+  }
+  return items;
+}
+
+// Extract enums with members
+function extractEnums(content) {
+  const items = [];
+  if (!Array.isArray(content)) return items;
+  
+  for (const e of content) {
+    items.push({ type: 'enum', name: e.name });
+    if (e.members) {
+      for (const m of e.members) {
+        items.push({ type: 'enum_member', enum: e.name, name: m.name, value: m.value });
+      }
+    }
+  }
+  return items;
+}
+
+// Extract types
+function extractTypes(content) {
+  if (!Array.isArray(content)) return [];
+  return content.map(t => ({ type: t.kind, name: t.name }));
+}
+
+// Extract modifiers
+function extractModifiers(content) {
+  const items = [];
+  if (typeof content !== 'object') return items;
+  for (const [cat, list] of Object.entries(content)) {
+    if (Array.isArray(list)) {
+      list.forEach(m => items.push({ type: 'modifier', category: cat, name: m }));
+    }
+  }
+  return items;
+}
+
+// Extract events
+function extractEvents(content) {
+  if (Array.isArray(content)) {
+    // Array format (game events)
+    return content.map(e => {
+      const fieldsDetail = (e.fields || []).map(f => `${f.name}: ${f.type || 'unknown'}`).join(', ');
+      return { type: 'event', name: e.name, fieldsDetail };
+    });
+  }
+  if (typeof content === 'object' && content !== null) {
+    // Object format (panorama events)
+    return Object.entries(content).map(([name, data]) => {
+      const argsDetail = (data.args || []).map(a => `${a.name}: ${a.type || 'unknown'}`).join(', ');
+      return { type: 'event', name, fieldsDetail: argsDetail, description: data.description || '' };
+    });
+  }
+  return [];
+}
+
+// Extract convars
+function extractConvars(content) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  return Object.keys(content).map(k => ({ type: 'convar', name: k }));
+}
+
+// Extract abilities — store full structured data for deep comparison
+function extractAbilities(content) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  const items = [];
+  for (const [name, data] of Object.entries(content)) {
+    items.push({ type: 'ability', name, data: typeof data === 'object' && data !== null ? data : {} });
+  }
+  return items;
+}
+
+// Extract units — store full structured data for deep comparison
+function extractUnits(content) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  const items = [];
+  for (const [name, data] of Object.entries(content)) {
+    items.push({ type: 'unit', name, data: typeof data === 'object' && data !== null ? data : {} });
+  }
+  return items;
+}
+
+// Deep diff two KV objects, showing changes in KV style.
+// - Top level: only changed properties
+// - Object properties (e.g. AbilityValues): only changed sub-entries
+// - Sub-entries that are objects: ALL fields expanded as { old, new } for full context
+function deepDiffKV(oldObj, newObj) {
+  const diff = {};
+  const allKeys = new Set([...Object.keys(oldObj || {}), ...Object.keys(newObj || {})]);
+
+  for (const key of allKeys) {
+    const oldVal = oldObj?.[key];
+    const newVal = newObj?.[key];
+
+    if (oldVal === undefined && newVal !== undefined) {
+      diff[key] = isPlainObject(newVal) ? expandAllFields(null, newVal) : { old: null, new: newVal };
+    } else if (oldVal !== undefined && newVal === undefined) {
+      diff[key] = isPlainObject(oldVal) ? expandAllFields(oldVal, null) : { old: oldVal, new: null };
+    } else if (isPlainObject(oldVal) && isPlainObject(newVal)) {
+      // Nested objects: find changed sub-entries, expand each fully
+      const subDiff = {};
+      const subKeys = new Set([...Object.keys(oldVal), ...Object.keys(newVal)]);
+      let hasSubChanges = false;
+
+      for (const subKey of subKeys) {
+        const oldSub = oldVal[subKey];
+        const newSub = newVal[subKey];
+
+        if (JSON.stringify(oldSub) !== JSON.stringify(newSub)) {
+          if (isPlainObject(oldSub) || isPlainObject(newSub)) {
+            // Expand ALL fields of the sub-object with old/new per field
+            subDiff[subKey] = expandAllFields(
+              isPlainObject(oldSub) ? oldSub : null,
+              isPlainObject(newSub) ? newSub : null,
+            );
+            // If one side was a primitive, add it as _value
+            if (oldSub !== undefined && !isPlainObject(oldSub)) subDiff[subKey]._value = { old: oldSub, new: null };
+            if (newSub !== undefined && !isPlainObject(newSub)) subDiff[subKey]._value = { old: null, new: newSub };
+          } else {
+            subDiff[subKey] = { old: oldSub ?? null, new: newSub ?? null };
+          }
+          hasSubChanges = true;
+        }
+      }
+
+      if (hasSubChanges) {
+        diff[key] = subDiff;
+      }
+    } else if (String(oldVal) !== String(newVal)) {
+      diff[key] = { old: oldVal, new: newVal };
+    }
+  }
+  return diff;
+}
+
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+// Expand ALL fields of two objects, showing { old, new } for each field
+function expandAllFields(oldObj, newObj) {
+  const result = {};
+  const allKeys = new Set([
+    ...Object.keys(oldObj || {}),
+    ...Object.keys(newObj || {}),
+  ]);
+  for (const key of allKeys) {
+    result[key] = { old: oldObj?.[key] ?? null, new: newObj?.[key] ?? null };
+  }
+  return result;
+}
+
+// Extract unique KV property names from a flat KV object (abilities/items/units)
+// Collects all top-level property keys used across all entries
+function extractKvProperties(content, typeName) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  const propSet = new Set();
+  for (const [, data] of Object.entries(content)) {
+    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+      for (const key of Object.keys(data)) {
+        propSet.add(key);
+      }
+    }
+  }
+  return Array.from(propSet).sort().map(name => ({ type: typeName, name }));
+}
+
+// Extract modifier properties — only include properties that are available (true).
+// This way false→true shows as "added" (fixed) and true→false shows as "removed" (broken).
+function extractModifierProperties(content) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  return Object.entries(content)
+    .filter(([, available]) => available === true)
+    .map(([name]) => ({ type: 'modifier_property', name }));
+}
+
+// Extract CSS properties
+function extractCssProperties(content) {
+  if (typeof content !== 'object' || Array.isArray(content)) return [];
+  return Object.keys(content).map(k => ({ type: 'property', name: k }));
+}
+
+// Build a tracked-file state. `readFile(relPath)` returns the file's text content,
+// or null if it doesn't exist in that source (current working tree or a git ref).
+function buildState(readFile) {
+  const state = {};
+  const cache = new Map();
+  const read = (rel) => {
+    if (!cache.has(rel)) cache.set(rel, readFile(rel));
+    return cache.get(rel);
+  };
+
+  for (const tracked of trackedFiles) {
+    const raw = read(tracked.file);
+    if (raw == null) continue;
+
+    let content;
+    try {
+      content = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    let items = [];
+
+    switch (tracked.type) {
+      case 'api':
+        items = extractApiItems(content);
+        break;
+      case 'panorama_api':
+        items = extractPanoramaApiItems(content);
+        break;
+      case 'types':
+        items = extractTypes(content);
+        break;
+      case 'enums':
+      case 'panorama_enums':
+      case 'engine_enums':
+        items = extractEnums(content);
+        break;
+      case 'modifiers':
+        items = extractModifiers(content);
+        break;
+      case 'modifier_properties':
+        items = extractModifierProperties(content);
+        break;
+      case 'events':
+      case 'panorama_events':
+        items = extractEvents(content);
+        break;
+      case 'convars':
+        items = extractConvars(content);
+        break;
+      case 'panorama_css':
+        items = extractCssProperties(content);
+        break;
+      case 'abilities':
+        items = extractAbilities(content);
+        break;
+      case 'units':
+        items = extractUnits(content);
+        break;
+      case 'ability_kv_properties':
+        items = extractKvProperties(content, 'kv_property');
+        break;
+      case 'unit_kv_properties':
+        items = extractKvProperties(content, 'kv_property');
+        break;
+    }
+    
+    state[tracked.type] = { name: tracked.name, items };
+  }
+
+  return state;
+}
+
+// Current working-tree state.
+function buildCurrentState() {
+  return buildState((rel) => {
+    const filePath = path.join(filesDir, rel);
+    return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : null;
+  });
+}
+
+// State of the files as committed at a git ref (e.g. HEAD). Used as the "previous"
+// baseline so the diff is always consistent with what was actually published —
+// unlike state snapshots, which can drift from the committed data and then show
+// every item as added or surface phantom type "regressions".
+function buildStateFromGit(ref) {
+  const { execSync } = require('child_process');
+  const cwd = path.join(__dirname, '..');
+  return buildState((rel) => {
+    try {
+      return execSync(`git show ${ref}:files/${rel}`, {
+        cwd,
+        maxBuffer: 512 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString('utf8');
+    } catch {
+      return null;
+    }
+  });
+}
+
+// Create item key for comparison
+function itemKey(item) {
+  if (item.type === 'method') return `method:${item.class}.${item.name}`;
+  if (item.type === 'enum_member') return `enum_member:${item.enum}.${item.name}`;
+  if (item.type === 'modifier') return `modifier:${item.category}:${item.name}`;
+  return `${item.type}:${item.name}`;
+}
+
+// Build a detail fingerprint for an item (used to detect changes)
+// Only includes fields that have meaningful values
+function itemFingerprint(item) {
+  const parts = [];
+  if (item.signature) parts.push(`sig:${item.signature}`);
+  if (item.returns) parts.push(`ret:${item.returns}`);
+  if (item.value !== undefined) parts.push(`val:${item.value}`);
+  if (item.fieldsDetail) parts.push(`fields:${item.fieldsDetail}`);
+  return parts.join('|');
+}
+
+// Check if two items have meaningful differences
+// Only compares fields that BOTH items have (non-empty)
+function hasItemChanged(oldItem, newItem) {
+  const fieldsToCompare = ['signature', 'returns', 'value', 'fieldsDetail'];
+  for (const field of fieldsToCompare) {
+    const oldVal = oldItem[field];
+    const newVal = newItem[field];
+    // Only compare when both sides have a meaningful value
+    if (oldVal !== undefined && oldVal !== '' && newVal !== undefined && newVal !== '') {
+      if (String(oldVal) !== String(newVal)) return true;
+    }
+  }
+  return false;
+}
+
+// Build per-field diff between old and new items
+// Only includes fields where both have values and they differ
+function buildItemDiff(oldItem, newItem) {
+  const diffFields = {};
+  const fieldsToCompare = ['signature', 'returns', 'value', 'fieldsDetail', 'description'];
+  for (const field of fieldsToCompare) {
+    const oldVal = oldItem[field];
+    const newVal = newItem[field];
+    // Only include if both sides have meaningful values and they differ
+    if (oldVal !== undefined && oldVal !== '' && newVal !== undefined && newVal !== '') {
+      if (String(oldVal) !== String(newVal)) {
+        diffFields[field] = { old: String(oldVal), new: String(newVal) };
+      }
+    }
+  }
+  return diffFields;
+}
+
+// Compare states
+function compareStates(prev, curr) {
+  const changes = {};
+  
+  for (const [key, currData] of Object.entries(curr)) {
+    const prevData = prev?.[key];
+    const prevItems = prevData?.items || [];
+    const prevMap = new Map(prevItems.map(i => [itemKey(i), i]));
+    const currMap = new Map(currData.items.map(i => [itemKey(i), i]));
+    
+    const prevKeys = new Set(prevMap.keys());
+    const currKeys = new Set(currMap.keys());
+    
+    const added = currData.items.filter(i => !prevKeys.has(itemKey(i)));
+    const removed = prevItems.filter(i => !currKeys.has(itemKey(i)));
+    
+    // Detect changes in items that exist in both states
+    const changed = [];
+    const trackableTypes = new Set(['function', 'method', 'ability', 'unit']);
+    const kvTypes = new Set(['ability', 'unit']);
+    for (const [k, currItem] of currMap) {
+      if (prevMap.has(k) && trackableTypes.has(currItem.type)) {
+        const prevItem = prevMap.get(k);
+
+        // Abstract methods (e.g. the modifier function handlers on
+        // CDOTA_Modifier_Lua) are hand-maintained interface declarations, not
+        // dump-derived API. Their availability is tracked in "Properties Fixed";
+        // don't also report their signature/return flips as Lua API changes.
+        if (currItem.abstract || prevItem.abstract) continue;
+
+        if (kvTypes.has(currItem.type)) {
+          // Deep KV diff for abilities and units
+          // Skip if previous state lacks structured data (old format migration)
+          if (!prevItem.data) continue;
+          const kvDiff = deepDiffKV(prevItem.data, currItem.data);
+          if (Object.keys(kvDiff).length > 0) {
+            changed.push({
+              type: currItem.type,
+              name: currItem.name,
+              changes: kvDiff,
+            });
+          }
+        } else if (hasItemChanged(prevItem, currItem)) {
+          const diff = buildItemDiff(prevItem, currItem);
+          // Skip if only description changed (too noisy) unless it's the only change
+          const nonDescChanges = Object.keys(diff).filter(f => f !== 'description');
+          if (nonDescChanges.length > 0) {
+            changed.push({
+              type: currItem.type,
+              name: currItem.name,
+              class: currItem.class,
+              enum: currItem.enum,
+              category: currItem.category,
+              changes: diff,
+            });
+          }
+        }
+      }
+    }
+    
+    if (added.length > 0 || removed.length > 0 || changed.length > 0) {
+      changes[currData.name] = { added, removed, changed };
+    }
+  }
+  
+  if (prev) {
+    for (const [key, prevData] of Object.entries(prev)) {
+      if (!curr[key] && prevData.items.length > 0) {
+        changes[prevData.name] = { added: [], removed: prevData.items, changed: [] };
+      }
+    }
+  }
+  
+  return changes;
+}
+
+// Escape control characters to their KV-file form so multi-line strings stay on one
+// changelog row (matches how the localization page renders values).
+function escapeLoc(v) {
+  return typeof v === 'string'
+    ? v.replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t')
+    : v;
+}
+
+// Build the "Localization" category by diffing the previous version's english.json
+// (at git ref `prevRef`) against the current working-tree english.json. Kept out of
+// the state snapshots (which would bloat by several MB); English is the canonical source.
+function buildLocalizationChanges(prevRef) {
+  const { execSync } = require('child_process');
+  const englishPath = path.join(filesDir, 'localization', 'english.json');
+  if (!fs.existsSync(englishPath)) return null;
+
+  let current;
+  try {
+    current = JSON.parse(fs.readFileSync(englishPath, 'utf8'));
+  } catch {
+    return null;
+  }
+
+  let previous = null;
+  if (prevRef) {
+    try {
+      const prevText = execSync(`git show ${prevRef}:files/localization/english.json`, {
+        cwd: path.join(__dirname, '..'),
+        maxBuffer: 512 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString('utf8');
+      previous = JSON.parse(prevText);
+    } catch {
+      // No committed english.json at that ref (no git, or first commit).
+    }
+  }
+
+  // Without a previous baseline every token would look "added", which is noise rather
+  // than a changelog — skip the category entirely in that case.
+  if (!previous || Object.keys(previous).length === 0) return null;
+
+  const added = [];
+  const removed = [];
+  const changed = [];
+  const prevKeys = new Set(Object.keys(previous));
+
+  for (const [name, value] of Object.entries(current)) {
+    if (!prevKeys.has(name)) {
+      added.push({ type: 'localization', name, value: escapeLoc(value) });
+    } else if (previous[name] !== value) {
+      changed.push({
+        type: 'localization',
+        name,
+        changes: { value: { old: escapeLoc(previous[name]), new: escapeLoc(value) } },
+      });
+    }
+  }
+  for (const name of prevKeys) {
+    if (!(name in current)) {
+      removed.push({ type: 'localization', name, value: escapeLoc(previous[name]) });
+    }
+  }
+
+  if (added.length || removed.length || changed.length) {
+    return { added, removed, changed };
+  }
+  return null;
+}
+
+// Walk back through git history to find the most recent commit whose dump is a
+// DIFFERENT version than the current one. That commit's files are the correct
+// "previous version" baseline — this works whether the current version is still
+// in the working tree (HEAD is the previous version) or already committed (HEAD is
+// the current version, so we need HEAD~1). Returns { ref, version }.
+function findPreviousRef(currentVer) {
+  const { execSync } = require('child_process');
+  const cwd = path.join(__dirname, '..');
+  let shas = [];
+  try {
+    shas = execSync('git rev-list --max-count=60 HEAD', { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
+      .toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return { ref: null, version: null };
+  }
+  for (const sha of shas) {
+    try {
+      const dump = execSync(`git show ${sha}:dumper/dump`, {
+        cwd,
+        maxBuffer: 512 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString('utf8');
+      const m = dump.match(/ClientVersion=(\d+)/);
+      if (m && m[1] !== currentVer) return { ref: sha, version: m[1] };
+    } catch {
+      // dumper/dump not present in this commit — keep walking back.
+    }
+  }
+  return { ref: null, version: null };
+}
+
+// Main
+const currState = buildCurrentState();
+
+// Diff against the previous version's COMMITTED data — the last published version —
+// rather than a state snapshot. Snapshots can drift out of sync with the committed
+// files, which is what produced both the bogus "everything is new" changelog and
+// the phantom type "regressions" (e.g. Vector -> unknown, float -> nil).
+const prev = findPreviousRef(currentVersion.version);
+const prevVersion = prev.version;
+console.log(`Previous version: ${prevVersion || 'none'} (git ${prev.ref ? prev.ref.slice(0, 8) : 'n/a'})`);
+
+const prevState = prev.ref ? buildStateFromGit(prev.ref) : {};
+
+// Safety net: if we found a previous commit but read none of its tracked files,
+// refuse to emit a changelog that marks everything as new.
+if (prev.ref && Object.keys(prevState).length === 0) {
+  console.error('Could not read previous state from git — aborting to avoid a bogus "everything is new" changelog.');
+  process.exit(1);
+}
+
+const changes = compareStates(prevState, currState);
+
+// "Properties Fixed" tracks modifier-property availability (only `true` values are
+// stored in the state). A property becoming available shows up as "added" and one
+// becoming unavailable as "removed". Re-render those as explicit value flips so the
+// changelog reads e.g. `MODIFIER_PROPERTY_MOVESPEED_MAX_BONUS_CONSTANT: true -> false`
+// (and the reverse) instead of bare add/remove rows.
+const propsFixed = changes['Properties Fixed'];
+if (propsFixed) {
+  const flips = [
+    ...(propsFixed.added || []).map(it => ({
+      type: 'modifier_property',
+      name: it.name,
+      changes: { value: { old: 'false', new: 'true' } },
+    })),
+    ...(propsFixed.removed || []).map(it => ({
+      type: 'modifier_property',
+      name: it.name,
+      changes: { value: { old: 'true', new: 'false' } },
+    })),
+  ];
+  if (flips.length > 0) {
+    flips.sort((a, b) => a.name.localeCompare(b.name));
+    propsFixed.added = [];
+    propsFixed.removed = [];
+    propsFixed.changed = [...(propsFixed.changed || []), ...flips];
+  }
+}
+
+// Localization is diffed straight from git (previous commit vs working tree) rather
+// than the state snapshots, then merged in as its own category.
+const localizationChanges = buildLocalizationChanges(prev.ref);
+if (localizationChanges) {
+  changes['Localization'] = localizationChanges;
+}
+
+// Count changes
+let addedCount = 0, removedCount = 0, changedCount = 0;
+for (const cat of Object.values(changes)) {
+  addedCount += cat.added?.length || 0;
+  removedCount += cat.removed?.length || 0;
+  changedCount += cat.changed?.length || 0;
+}
+
+// Write changelog
+const changelogEntry = {
+  version: currentVersion.version,
+  date: currentVersion.date,
+  time: currentVersion.time,
+  changes,
+};
+
+fs.writeFileSync(path.join(changelogsDir, `${currentVersion.version}.json`), JSON.stringify(changelogEntry, null, 2));
+
+// Save state
+fs.writeFileSync(path.join(statesDir, `${currentVersion.version}.json`), JSON.stringify(currState, null, 2));
+
+// Update index
+let index = [];
+if (fs.existsSync(changelogIndexPath)) {
+  index = JSON.parse(fs.readFileSync(changelogIndexPath, 'utf8'));
+}
+
+const existingIdx = index.findIndex(e => e.version === currentVersion.version);
+const indexEntry = {
+  version: currentVersion.version,
+  date: currentVersion.date,
+  time: currentVersion.time,
+  addedCount,
+  removedCount,
+  changedCount,
+};
+
+if (existingIdx !== -1) {
+  index[existingIdx] = indexEntry;
+} else {
+  index.push(indexEntry);
+}
+
+index.sort((a, b) => parseInt(b.version) - parseInt(a.version));
+fs.writeFileSync(changelogIndexPath, JSON.stringify(index, null, 2));
+
+console.log(`\nGenerated changelog for version ${currentVersion.version}`);
+console.log(`Changes: +${addedCount} added, -${removedCount} removed, ~${changedCount} changed`);
+
+if (addedCount > 0 || removedCount > 0 || changedCount > 0) {
+  for (const [cat, ch] of Object.entries(changes)) {
+    const a = ch.added?.length || 0;
+    const r = ch.removed?.length || 0;
+    const c = ch.changed?.length || 0;
+    if (a > 0 || r > 0 || c > 0) console.log(`  ${cat}: +${a} -${r} ~${c}`);
+  }
+}

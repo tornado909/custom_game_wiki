@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "node",
+    "target": "esnext",
+    "strict": true
+  },
+  "include": [
+    "start-dumper.mts",
+    "vconsole.mts",
+    "build-modifiers.ts",
+    "build-abilities.ts",
+    "build-units.ts"
+  ]
+}

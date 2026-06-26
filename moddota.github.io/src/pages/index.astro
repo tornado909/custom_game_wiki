@@ -1,0 +1,28 @@
+---
+import { getCollection, render } from 'astro:content';
+import ArticleLayout from '../layouts/ArticleLayout.astro';
+
+const articles = await getCollection('articles');
+const homeArticle = articles.find((a) => a.id === 'index');
+let Content;
+if (homeArticle) {
+  const rendered = await render(homeArticle);
+  Content = rendered.Content;
+}
+---
+
+<ArticleLayout title="Custom Map Wiki">
+  {Content ? (
+    <Content />
+  ) : (
+    <div>
+      <h2>Custom Map Wiki</h2>
+      <p>Technical reference for custom map abilities, modifiers, icons, and localization.</p>
+      <p>
+        Browse <a href={`${import.meta.env.BASE_URL}api/abilities`}>abilities</a>,{' '}
+        <a href={`${import.meta.env.BASE_URL}api/modifiers`}>modifiers</a>, or{' '}
+        <a href={`${import.meta.env.BASE_URL}api/localization`}>localization</a>.
+      </p>
+    </div>
+  )}
+</ArticleLayout>

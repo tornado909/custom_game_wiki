@@ -1,0 +1,214 @@
+import assert from 'assert';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import _ from 'lodash';
+import { getEnumDescription } from '../api/data/modifier-properties';
+import { clientDump, DumpConstant, serverDump } from '../dump';
+import { enums as panoramaEnums } from '../../panorama/enums';
+import {
+  droppedConstants,
+  enumValueDescriptions,
+  extractedConstants,
+  globalEnums,
+  prefixedEnums,
+} from './data';
+import { Availability, Constant, Enum, EnumMember } from './types';
+
+export { types as enumsTypes } from './types';
+
+export type EnumOrConstant = Enum | Constant;
+
+interface EnumResult {
+  clientGlobals: DumpConstant[];
+  serverGlobals: DumpConstant[];
+  enumDeclarations: Array<Enum | Constant>;
+  unknownGlobals: DumpConstant[];
+}
+
+/**
+ * Fix enum member values that overflow in Lua's 32-bit integers.
+ * Values >= 2^31 become 0 or -2147483648 in the Lua dump, but Panorama
+ * (JavaScript) has the correct 64-bit values. This cross-references
+ * panorama enums to restore the correct values.
+ */
+function fixLuaIntOverflow(constants: DumpConstant[]): void {
+  const panoramaLookup = new Map<string, number>();
+  for (const penum of panoramaEnums) {
+    for (const member of penum.members) {
+      panoramaLookup.set(member.name, member.value);
+    }
+  }
+
+  for (const constant of constants) {
+    if (constant.value !== 0 && constant.value !== -2147483648) continue;
+    const panoramaValue = panoramaLookup.get(constant.name);
+    if (panoramaValue != null && panoramaValue > 0 && panoramaValue !== constant.value) {
+      constant.value = panoramaValue;
+    }
+  }
+}
+
+export function generateEnumDeclarations(): EnumResult {
+  const serverGlobals = serverDump.filter((x): x is DumpConstant => x.kind === 'constant');
+  const clientGlobals = clientDump.filter((x): x is DumpConstant => x.kind === 'constant');
+  fixLuaIntOverflow(serverGlobals);
+  fixLuaIntOverflow(clientGlobals);
+  let allGlobals = [
+    ...serverGlobals,
+    ...clientGlobals.filter((cc) => !serverGlobals.some((sc) => sc.name === cc.name)),
+  ].filter(({ name }) => !droppedConstants.includes(name));
+  const takeGlobals = (filter: (name: DumpConstant) => boolean) => {
+    const [extracted, rest] = _.partition(allGlobals, filter);
+    if (extracted.length === 0) {
+      console.warn('Warning: No matching globals found for filter, skipping...');
+    }
+    allGlobals = rest;
+    return extracted;
+  };
+
+  const getAvailability = (n: string): Availability =>
+    clientGlobals.some((x) => x.name === n) ? 'both' : 'server';
+
+  const constants = takeGlobals((x) => extractedConstants.includes(x.name))
+    .map(
+      ({ name, description, value }): Constant => ({
+        kind: 'constant',
+        name,
+        description,
+        value,
+        available: getAvailability(name),
+      }),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name, 'en'));
+
+  const transformMembers = (members: DumpConstant[]) =>
+    members
+      .map(({ name, description, value }): EnumMember => ({ name, description, value }))
+      .sort((a, b) => a.value - b.value);
+
+  const getCommonAvailability = (members: DumpConstant[]) => {
+    const memberAvailability = members.map(({ name }) => getAvailability(name));
+    if (memberAvailability.every((x) => x === memberAvailability[0])) return memberAvailability[0];
+
+    throw new Error('Enum has members with different availability');
+  };
+
+  const enums: Enum[] = [];
+
+  enums.push(
+    ...Object.entries(prefixedEnums).flatMap(([name, prefix]): Enum[] => {
+      const members = takeGlobals((x) =>
+        typeof prefix === 'string' ? x.name.startsWith(prefix) : prefix.test(x.name),
+      );
+      if (members.length === 0) {
+        console.warn(`Warning: Prefixed enum "${name}" has no matching globals, skipping.`);
+        return [];
+      }
+
+      return [{
+        kind: 'enum',
+        name,
+        available: getCommonAvailability(members),
+        members: transformMembers(members),
+      }];
+    }),
+  );
+
+  enums.push(
+    ...Object.entries(globalEnums).flatMap(([name, values]): Enum[] => {
+      const members = takeGlobals((x) => values.includes(x.name));
+      if (members.length === 0) {
+        console.warn(`Warning: Global enum "${name}" has no matching globals, skipping.`);
+        return [];
+      }
+      return [{
+        kind: 'enum',
+        name,
+        available: getCommonAvailability(members),
+        members: transformMembers(members),
+      }];
+    }),
+  );
+
+  enums.push(
+    ...Object.entries(
+      _.groupBy(
+        takeGlobals((x) => x.enum != null),
+        (x) => x.enum!,
+      ),
+    ).map(
+      ([name, members]): Enum => ({
+        kind: 'enum',
+        name,
+        available: getCommonAvailability(members),
+        members: transformMembers(members),
+      }),
+    ),
+  );
+
+  // Mark enum members with values > 2^31 — these overflow in Lua (32-bit integers)
+  for (const enumDecl of enums) {
+    for (const member of enumDecl.members) {
+      if (member.value > 0x7FFFFFFF) {
+        member.overflow = true;
+      }
+    }
+  }
+
+  _.each(enumValueDescriptions, (descriptions, scopeName) => {
+    const enumValue = enums.find((x) => x.name === scopeName);
+    if (enumValue == null) throw new Error(`Enum ${scopeName} not found`);
+
+    _.each(descriptions, (description, memberName) => {
+      if (memberName === '__self') {
+        enumValue.description = description;
+      } else {
+        const member = enumValue.members.find((x) => x.name === memberName);
+        if (member) {
+          member.description = description;
+        }
+      }
+    });
+  });
+
+  const modifierPropertiesPath = join(__dirname, '../../../files/vscripts/modifier_properties.json');
+  const modifierProperties: Record<string, boolean> = existsSync(modifierPropertiesPath)
+    ? (JSON.parse(readFileSync(modifierPropertiesPath, 'utf8')) as Record<string, boolean>)
+    : {};
+
+  for (const member of enums.find((x) => x.name === 'modifierfunction')!.members) {
+    member.description = getEnumDescription(member.description);
+    if (member.name in modifierProperties && modifierProperties[member.name] === false) {
+      member.broken = true;
+    }
+  }
+
+  enums.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+
+  return {
+    clientGlobals: clientGlobals.filter(({ name }) => !droppedConstants.includes(name)),
+    serverGlobals: serverGlobals.filter(({ name }) => !droppedConstants.includes(name)),
+    enumDeclarations: [...constants, ...enums],
+    unknownGlobals: allGlobals,
+  };
+}
+
+export function validateEnums(enumsInfo: EnumResult) {
+  // Make sure that all there are no different constants on client and server
+  const serverGlobals = new Map(enumsInfo.serverGlobals.map((g) => [g.name, g]));
+  for (const { name, value, description } of enumsInfo.clientGlobals) {
+    const serverValue = serverGlobals.get(name);
+    if (!serverGlobals.has(name)) {
+      console.error(`Available only on client: ${name}`);
+      continue;
+    }
+
+    if (value !== serverValue?.value || description !== serverValue.description) {
+      throw new Error(`${name} exists on server and client, but has different values`);
+    }
+  }
+
+  for (const constant of enumsInfo.unknownGlobals) {
+    console.log(`Unknown constant or enum: ${constant.name}`);
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "name": "@moddota/dota-data",
+  "version": "0.44.0",
+  "description": "Auto-generated custom map resource dumps",
+  "repository": "https://github.com/ModDota/dota-data",
+  "license": "Apache-2.0",
+  "author": "ark120202",
+  "files": [
+    "lib/**/*.{js,ts}",
+    "files/**/*.{json,ts}"
+  ],
+  "scripts": {
+    "build": "run-s build:clean build:abilities build:units build:modifiers build:localization build:icons build:tsc",
+    "build:clean": "rimraf \"files/abilities.json\" \"files/ability-hero-map.json\" \"files/heroes.json\" \"files/units.json\" \"files/vscripts\" \"files/images-manifest.json\" \"files/localization\" \"lib\" \"dumper/.kv-cache\"",
+    "build:tsc": "tsc -p src",
+    "build:icons": "tsx dumper/build-icons.ts",
+    "dev": "run-p dev:static dev:tsc",
+    "dev:static": "nodemon",
+    "dev:tsc": "tsc --watch --preserveWatchOutput",
+    "lint": "run-p lint:*",
+    "lint:eslint": "eslint",
+    "lint:prettier": "prettier --check .",
+    "fix:prettier": "prettier --write .",
+    "prepublishOnly": "npm run build:tsc",
+    "test": "jest",
+    "auto-dump": "tsx dumper/start-dumper.mts",
+    "build:modifiers": "tsx dumper/build-modifiers.ts",
+    "build:modifier-properties": "tsx dumper/build-modifier-properties.ts",
+    "build:abilities": "tsx dumper/build-abilities.ts",
+    "build:units": "tsx dumper/build-units.ts",
+    "build:localization": "tsx dumper/build-localization.ts",
+    "full-build": "run-s auto-dump build"
+  },
+  "prettier": {
+    "printWidth": 100,
+    "proseWrap": "always",
+    "singleQuote": true,
+    "trailingComma": "all"
+  },
+  "jest": {
+    "globals": {
+      "ts-jest": {
+        "tsconfig": "<rootDir>/test/tsconfig.json"
+      }
+    },
+    "preset": "ts-jest",
+    "testMatch": [
+      "**/test/**/*.[jt]s?(x)",
+      "!**/_*"
+    ]
+  },
+  "dependencies": {
+    "fs-extra": "^9.0.1",
+    "got": "^11.6.0",
+    "lodash": "^4.17.20",
+    "vdf-extra": "^2.2.2"
+  },
+  "devDependencies": {
+    "@moddota/find-steam-app": "^1.1.0",
+    "@types/dedent": "^0.7.0",
+    "@types/fs-extra": "^9.0.1",
+    "@types/jest": "^26.0.24",
+    "@types/lodash": "^4.14.161",
+    "@types/node": "^22.13.4",
+    "@typescript-eslint/eslint-plugin": "^5.54.1",
+    "@typescript-eslint/parser": "^5.54.1",
+    "dedent": "^0.7.0",
+    "eslint": "^7.32.0",
+    "jest": "^30.3.0",
+    "nodemon": "^3.1.14",
+    "npm-run-all": "^4.1.5",
+    "prettier": "2.3.0",
+    "rimraf": "^3.0.2",
+    "ts-jest": "^29.4.9",
+    "tsx": "^4.21.0",
+    "typescript": "^4.9.5",
+    "valve-kv": "^1.2.1"
+  },
+  "engines": {
+    "node": ">=12.13.0"
+  }
+}
