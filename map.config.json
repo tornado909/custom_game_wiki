@@ -1,0 +1,10 @@
+{
+  "workshopId": "2841840871",
+  "mapTitle": "Thunder's COT RPG Old School",
+  "gameDir": "game",
+  "contentDir": "content",
+  "vpkSearchPaths": [
+    "vpk/2841840871_dir.vpk",
+    "vpk/2841840871.vpk"
+  ]
+}

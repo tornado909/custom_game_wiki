@@ -1,0 +1,2 @@
+mklink /j "E:\js_projects\custom_game_wiki\game" "D:\SteamLibrary\steamapps\common\dota 2 beta\game\dota_addons\thundercot_old_school"
+mklink /j "E:\js_projects\custom_game_wiki\content" "D:\SteamLibrary\steamapps\common\dota 2 beta\content\dota_addons\thundercot_old_school"
